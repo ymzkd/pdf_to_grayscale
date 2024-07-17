@@ -1,5 +1,4 @@
 import streamlit as st 
-import PyPDF2
 from PIL import Image
 from io import BytesIO
 import fitz  # PyMuPDF
