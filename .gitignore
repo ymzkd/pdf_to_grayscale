@@ -1,0 +1,69 @@
+# macOS関連のファイルを無視する
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# macOSのゴミ箱ファイルを無視する
+.Spotlight-V100
+.Trashes
+
+# macOSの特定のフォルダ属性を無視する
+._*
+
+# macOSのシンボリックリンクを無視する
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# macOSのスリープファイルを無視する
+.Spotlight-V100
+.fseventsd
+
+# Python関連のファイルを無視する
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 環境設定ファイルを無視する
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter Notebookのチェックポイントを無視する
+.ipynb_checkpoints
+
+# mypyのキャッシュファイルを無視する
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyreのキャッシュファイルを無視する
+.pyre/
+
+# Coverageの結果ファイルを無視する
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# pytestの結果ファイルを無視する
+.pytest_cache/
+
+# toxの環境ファイルを無視する
+.tox/
+.nox/
+
+# Sphinxのビルドファイルを無視する
+docs/_build/
+
+# pylamaの設定ファイルを無視する
+pylama.ini
+
+# PEP 582; https://www.python.org/dev/peps/pep-0582/
+__pypackages__/
