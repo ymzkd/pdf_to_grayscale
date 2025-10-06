@@ -30,22 +30,23 @@ def convert_to_grayscale(input_pdf_stream, dpi=300):
     return output_pdf_stream
 
 st.title("PDF to Grayscale Converter")
+
 uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
 if uploaded_file is not None:
     st.write("File uploaded successfully.")
-    
+
     dpi = st.slider("Select DPI (Resolution)", 100, 600, 300)
-    
+
     if st.button("Convert to Grayscale"):
         with st.spinner("Converting..."):
             output_pdf_stream = convert_to_grayscale(uploaded_file, dpi=dpi)
-        
+
         st.success("Conversion successful!")
-        
+
         # 入力ファイル名を取得し、拡張子を変更
         input_filename = uploaded_file.name
         output_filename = input_filename.rsplit('.', 1)[0] + "_GR.pdf"
-        
+
         st.download_button(
             label="Download Grayscale PDF",
             data=output_pdf_stream,
