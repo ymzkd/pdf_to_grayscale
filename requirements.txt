@@ -1,3 +1,4 @@
 streamlit
 Pillow
 pymupdf
+pypdf2
