@@ -8,6 +8,20 @@ import os
 import tempfile
 
 
+# ezdxfが書き出しに対応しているDXFリリース → AC内部コード。
+# 実用上必要な4バージョンに絞っている（R2004/R2007/R12 は省略）。
+# - R2018: 最新のCAD向け
+# - R2013: やや新しめのCAD向け
+# - R2010: 互換性バランスが良い既定値
+# - R2000: 古いCADや他社CAD互換用
+DXF_VERSION_CHOICES = {
+    "R2018": "AC1032",
+    "R2013": "AC1027",
+    "R2010": "AC1024",
+    "R2000": "AC1015",
+}
+
+
 # MTEXTのattachment_point (1-9) を TEXT の TextEntityAlignment に対応付ける。
 #   1 = Top Left,    2 = Top Center,    3 = Top Right
 #   4 = Middle Left, 5 = Middle Center, 6 = Middle Right
@@ -100,10 +114,15 @@ def convert_mtext_entity_to_text(mtext):
     return created
 
 
-def convert_dxf_mtext_to_text(uploaded_file):
-    """アップロードされたDXFのMTEXTをすべてTEXTに変換し、バイト列を返す。"""
+def convert_dxf_mtext_to_text(uploaded_file, target_version=None):
+    """アップロードされたDXFのMTEXTをすべてTEXTに変換し、バイト列を返す。
+
+    target_version に AC コード（例: "AC1024"）を渡すと、保存時にそのDXFバージョンへ
+    切り替えて書き出す。None の場合は入力ファイルのバージョンを維持する。
+    """
     uploaded_file.seek(0)
     doc, auditor = recover.read(uploaded_file)
+    source_version = doc.dxfversion
 
     mtext_count = 0
     text_count = 0
@@ -114,6 +133,10 @@ def convert_dxf_mtext_to_text(uploaded_file):
         for mtext in list(block.query("MTEXT")):
             text_count += convert_mtext_entity_to_text(mtext)
             mtext_count += 1
+
+    # 出力バージョンを上書きする場合はここで差し替える
+    if target_version:
+        doc.dxfversion = target_version
 
     # ezdxfのwrite/saveasはテキストモードで書き出すため、
     # 一時ファイル経由でバイト列を取得する。
@@ -128,7 +151,7 @@ def convert_dxf_mtext_to_text(uploaded_file):
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
-    return output_bytes, mtext_count, text_count, auditor
+    return output_bytes, mtext_count, text_count, auditor, source_version, doc.dxfversion
 
 
 # ========== UI ==========
@@ -151,6 +174,7 @@ with st.expander("変換仕様について"):
             - 水平: Left / Center / Right
             - 垂直: Top / Middle / Bottom
         - **行位置**: 行送りは `char_height × 1.6667 × line_spacing_factor`。垂直アンカーに応じて Top なら下方向、Middle なら中央基準、Bottom なら上方向に行を積みます
+        - **出力DXFバージョン**: 入力と同じバージョンのほか、R12〜R2018から選択可能です
         """
     )
 
@@ -159,12 +183,33 @@ uploaded_file = st.file_uploader("DXFファイルを選択してください", t
 if uploaded_file is not None:
     st.success(f"ファイルを読み込みました: **{uploaded_file.name}**")
 
+    # 出力DXFバージョン選択
+    version_options = ["入力ファイルと同じ"] + list(DXF_VERSION_CHOICES.keys())
+    # 古いCADで読みやすいR2010をデフォルトにする
+    default_index = version_options.index("R2010")
+    selected_version = st.selectbox(
+        "出力DXFバージョン",
+        options=version_options,
+        index=default_index,
+        help="取り込み先ソフトが新しいDXFを読めない場合は古いバージョンを選択してください。"
+             "R2010が互換性と機能のバランスが良い選択です。",
+    )
+    target_version = (
+        None if selected_version == "入力ファイルと同じ"
+        else DXF_VERSION_CHOICES[selected_version]
+    )
+
     if st.button("MTEXTをTEXTに変換", type="primary"):
         with st.spinner("変換中..."):
             try:
-                output_bytes, mtext_count, text_count, auditor = (
-                    convert_dxf_mtext_to_text(uploaded_file)
-                )
+                (
+                    output_bytes,
+                    mtext_count,
+                    text_count,
+                    auditor,
+                    source_version,
+                    output_version,
+                ) = convert_dxf_mtext_to_text(uploaded_file, target_version=target_version)
             except ezdxf.DXFStructureError as e:
                 st.error(f"DXFファイルの読み込みに失敗しました: {e}")
             except Exception as e:
@@ -179,6 +224,10 @@ if uploaded_file is not None:
                     with col2:
                         st.metric("生成したTEXT", f"{text_count} 個")
                     st.success("変換が完了しました。")
+
+                src_label = ezdxf.const.acad_release.get(source_version, source_version)
+                out_label = ezdxf.const.acad_release.get(output_version, output_version)
+                st.caption(f"入力DXFバージョン: {src_label} → 出力: {out_label}")
 
                 if auditor.has_errors:
                     with st.expander(
