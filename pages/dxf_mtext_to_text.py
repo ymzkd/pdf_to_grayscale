@@ -9,16 +9,16 @@ import tempfile
 
 
 # ezdxfが書き出しに対応しているDXFリリース → AC内部コード。
-# 実用上必要な4バージョンに絞っている（R2004/R2007/R12 は省略）。
-# - R2018: 最新のCAD向け
-# - R2013: やや新しめのCAD向け
-# - R2010: 互換性バランスが良い既定値
-# - R2000: 古いCADや他社CAD互換用
+# ezdxf.const.versions_supported_by_save と ezdxf.const.acad_release を参照。
+# 既定は R2010（取り込み先の互換性実績がよい）。
 DXF_VERSION_CHOICES = {
     "R2018": "AC1032",
     "R2013": "AC1027",
     "R2010": "AC1024",
+    "R2007": "AC1021",
+    "R2004": "AC1018",
     "R2000": "AC1015",
+    "R12":   "AC1009",
 }
 
 
