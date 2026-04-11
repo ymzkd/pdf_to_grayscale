@@ -2,3 +2,4 @@ streamlit
 Pillow
 pymupdf
 pypdf2
+ezdxf
