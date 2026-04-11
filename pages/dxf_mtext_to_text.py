@@ -1,10 +1,28 @@
 import streamlit as st
 import ezdxf
 from ezdxf import recover
+from ezdxf.enums import TextEntityAlignment
 import io
 import math
 import os
 import tempfile
+
+
+# MTEXTのattachment_point (1-9) を TEXT の TextEntityAlignment に対応付ける。
+#   1 = Top Left,    2 = Top Center,    3 = Top Right
+#   4 = Middle Left, 5 = Middle Center, 6 = Middle Right
+#   7 = Bottom Left, 8 = Bottom Center, 9 = Bottom Right
+ATTACHMENT_TO_ALIGN = {
+    1: TextEntityAlignment.TOP_LEFT,
+    2: TextEntityAlignment.TOP_CENTER,
+    3: TextEntityAlignment.TOP_RIGHT,
+    4: TextEntityAlignment.MIDDLE_LEFT,
+    5: TextEntityAlignment.MIDDLE_CENTER,
+    6: TextEntityAlignment.MIDDLE_RIGHT,
+    7: TextEntityAlignment.BOTTOM_LEFT,
+    8: TextEntityAlignment.BOTTOM_CENTER,
+    9: TextEntityAlignment.BOTTOM_RIGHT,
+}
 
 
 def convert_mtext_entity_to_text(mtext):
@@ -32,21 +50,35 @@ def convert_mtext_entity_to_text(mtext):
     style = mtext.dxf.get("style", "Standard")
     color = mtext.dxf.get("color", 256)
     line_spacing_factor = mtext.dxf.get("line_spacing_factor", 1.0) or 1.0
+    attachment_point = mtext.dxf.get("attachment_point", 1) or 1
+
+    align = ATTACHMENT_TO_ALIGN.get(attachment_point, TextEntityAlignment.TOP_LEFT)
 
     # AutoCADのデフォルトMTEXT行送りは文字高さの1.6667倍
     line_height = height * 1.6667 * line_spacing_factor
 
     angle_rad = math.radians(rotation)
     # 回転を考慮した「下方向」への行送りベクトル
-    dx = math.sin(angle_rad) * line_height
-    dy = -math.cos(angle_rad) * line_height
+    down_dx = math.sin(angle_rad) * line_height
+    down_dy = -math.cos(angle_rad) * line_height
+
+    # 垂直アンカー(Top/Middle/Bottom)に応じて、1行目のオフセット開始位置を決める。
+    # 各行 i の配置オフセット = (vertical_start + i) * 下方向ベクトル
+    n_lines = len(lines)
+    if attachment_point in (1, 2, 3):  # Top: 1行目を挿入点に合わせ、下方向に積む
+        vertical_start = 0.0
+    elif attachment_point in (4, 5, 6):  # Middle: 全体の中央が挿入点に来るよう配置
+        vertical_start = -(n_lines - 1) / 2.0
+    else:  # Bottom (7,8,9): 最終行を挿入点に合わせ、上方向に積む
+        vertical_start = -(n_lines - 1)
 
     created = 0
     for i, line in enumerate(lines):
         if line is None:
             line = ""
-        x = insert.x + dx * i
-        y = insert.y + dy * i
+        step = vertical_start + i
+        x = insert.x + down_dx * step
+        y = insert.y + down_dy * step
         z = getattr(insert, "z", 0.0)
 
         text = layout.add_text(
@@ -59,7 +91,8 @@ def convert_mtext_entity_to_text(mtext):
                 "color": color,
             },
         )
-        text.dxf.insert = (x, y, z)
+        # set_placement が halign/valign/insert/align_point をまとめて設定する
+        text.set_placement((x, y, z), align=align)
         created += 1
 
     # 元のMTEXTを削除
@@ -113,9 +146,11 @@ with st.expander("変換仕様について"):
         - **対象**: モデル空間・全ペーパー空間・全ブロック内のMTEXTエンティティ
         - **テキスト内容**: MTEXTのフォーマット記号（`\\P`, `\\L`, `{\\f...;...}` など）を除去したプレーンテキストに変換します
         - **改行**: MTEXT内の改行（`\\P`）ごとに別々のTEXTエンティティを生成します
-        - **位置**: MTEXTの挿入点を1行目の配置点とし、`char_height × 1.6667 × line_spacing_factor` で下方向にオフセットします
-        - **引き継ぐ属性**: レイヤー、文字スタイル、色、文字高さ、回転角
-        - **注意**: アタッチメントポイント（左上/中央など）は完全には再現されません。配置位置はMTEXTの挿入点を基準とします
+        - **引き継ぐ属性**: レイヤー、文字スタイル、色、文字高さ、回転角、**アタッチメントポイント（アラインメント）**
+        - **アラインメント**: MTEXTの `attachment_point` (1-9) を TEXT の `halign`/`valign` にマッピングします
+            - 水平: Left / Center / Right
+            - 垂直: Top / Middle / Bottom
+        - **行位置**: 行送りは `char_height × 1.6667 × line_spacing_factor`。垂直アンカーに応じて Top なら下方向、Middle なら中央基準、Bottom なら上方向に行を積みます
         """
     )
 
