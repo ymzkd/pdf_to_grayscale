@@ -22,30 +22,32 @@ def convert_to_grayscale_raster(pdf_bytes: bytes, dpi: int = 300) -> bytes:
     pdf_document = fitz.open("pdf", pdf_bytes)
     pdf_writer = fitz.open()
 
-    for page_num in range(pdf_document.page_count):
-        page = pdf_document.load_page(page_num)
-        pix = page.get_pixmap(dpi=dpi)
-        img = Image.open(io.BytesIO(pix.tobytes()))
-        grayscale_img = img.convert("L")
+    try:
+        for page_num in range(pdf_document.page_count):
+            page = pdf_document.load_page(page_num)
+            pix = page.get_pixmap(dpi=dpi)
+            img = Image.open(io.BytesIO(pix.tobytes()))
+            grayscale_img = img.convert("L")
 
-        img_buffer = io.BytesIO()
-        grayscale_img.save(img_buffer, format="PNG")
+            img_buffer = io.BytesIO()
+            grayscale_img.save(img_buffer, format="PNG")
 
-        new_page = pdf_writer.new_page(width=page.rect.width, height=page.rect.height)
-        new_page.insert_image(page.rect, stream=img_buffer.getvalue())
+            new_page = pdf_writer.new_page(width=page.rect.width, height=page.rect.height)
+            new_page.insert_image(page.rect, stream=img_buffer.getvalue())
 
-    output = io.BytesIO()
-    pdf_writer.save(
-        output,
-        garbage=4,
-        clean=True,
-        deflate=True,
-        deflate_images=True,
-        deflate_fonts=True,
-    )
-    pdf_writer.close()
-    pdf_document.close()
-    return output.getvalue()
+        output = io.BytesIO()
+        pdf_writer.save(
+            output,
+            garbage=4,
+            clean=True,
+            deflate=True,
+            deflate_images=True,
+            deflate_fonts=True,
+        )
+        return output.getvalue()
+    finally:
+        pdf_writer.close()
+        pdf_document.close()
 
 
 def _luma_rgb(r, g, b):
@@ -76,30 +78,18 @@ def _color_to_gray(values):
     return None
 
 
+NON_STROKING_OPS = {"rg", "k", "sc", "scn"}
+STROKING_OPS = {"RG", "K", "SC", "SCN"}
+
+
 def _rewrite_instructions(instructions):
     out = []
     for operands, operator in instructions:
         op = str(operator)
-        if op == "rg":
-            y = _luma_rgb(float(operands[0]), float(operands[1]), float(operands[2]))
-            out.append(([y], Operator("g")))
-        elif op == "RG":
-            y = _luma_rgb(float(operands[0]), float(operands[1]), float(operands[2]))
-            out.append(([y], Operator("G")))
-        elif op == "k":
-            y = _luma_cmyk(
-                float(operands[0]), float(operands[1]), float(operands[2]), float(operands[3])
-            )
-            out.append(([y], Operator("g")))
-        elif op == "K":
-            y = _luma_cmyk(
-                float(operands[0]), float(operands[1]), float(operands[2]), float(operands[3])
-            )
-            out.append(([y], Operator("G")))
-        elif op in ("sc", "scn"):
+        if op in NON_STROKING_OPS:
             y = _color_to_gray(operands)
             out.append(([y], Operator("g")) if y is not None else (operands, operator))
-        elif op in ("SC", "SCN"):
+        elif op in STROKING_OPS:
             y = _color_to_gray(operands)
             out.append(([y], Operator("G")) if y is not None else (operands, operator))
         else:
@@ -189,25 +179,24 @@ def _rewrite_annotation(annot, visited):
 
 
 def convert_to_grayscale_objects(pdf_bytes: bytes) -> bytes:
-    pdf = Pdf.open(io.BytesIO(pdf_bytes))
-    visited: set = set()
-    for page in pdf.pages:
-        _rewrite_page_content(page, pdf)
-        resources = page.get(Name.Resources)
-        if resources is not None:
-            _walk_resources(resources, visited)
-        annots = page.get(Name.Annots)
-        if annots is not None:
-            for annot in annots:
-                _rewrite_annotation(annot, visited)
-    pdf.remove_unreferenced_resources()
     buf = io.BytesIO()
-    pdf.save(
-        buf,
-        object_stream_mode=pikepdf.ObjectStreamMode.generate,
-        recompress_flate=True,
-    )
-    pdf.close()
+    with Pdf.open(io.BytesIO(pdf_bytes)) as pdf:
+        visited: set = set()
+        for page in pdf.pages:
+            _rewrite_page_content(page, pdf)
+            resources = page.get(Name.Resources)
+            if resources is not None:
+                _walk_resources(resources, visited)
+            annots = page.get(Name.Annots)
+            if annots is not None:
+                for annot in annots:
+                    _rewrite_annotation(annot, visited)
+        pdf.remove_unreferenced_resources()
+        pdf.save(
+            buf,
+            object_stream_mode=pikepdf.ObjectStreamMode.generate,
+            recompress_flate=True,
+        )
     return buf.getvalue()
 
 
