@@ -2,5 +2,6 @@ streamlit
 Pillow
 pymupdf
 pypdf2
+pikepdf
 ezdxf
 rhino3dm
