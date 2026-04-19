@@ -10,6 +10,14 @@ from pikepdf import Name, Operator, Pdf, PdfImage, parse_content_stream, unparse
 LUMA_COEFFS = (0.2126, 0.7152, 0.0722)  # BT.709
 
 
+def _format_size(bytes_size: int) -> str:
+    if bytes_size < 1024:
+        return f"{bytes_size} B"
+    if bytes_size < 1024 * 1024:
+        return f"{bytes_size / 1024:.2f} KB"
+    return f"{bytes_size / (1024 * 1024):.2f} MB"
+
+
 def convert_to_grayscale_raster(pdf_bytes: bytes, dpi: int = 300) -> bytes:
     pdf_document = fitz.open("pdf", pdf_bytes)
     pdf_writer = fitz.open()
@@ -227,6 +235,18 @@ if uploaded_file is not None:
                 st.error(f"変換に失敗しました: {exc}")
             else:
                 st.success("Conversion successful!")
+                input_size = len(pdf_bytes)
+                output_size = len(output_bytes)
+                ratio = output_size / input_size if input_size else 0
+                sign = "-" if output_size < input_size else "+"
+                col1, col2 = st.columns(2)
+                col1.metric("変換前", _format_size(input_size))
+                col2.metric(
+                    "変換後",
+                    _format_size(output_size),
+                    delta=f"{sign}{_format_size(abs(output_size - input_size))} ({ratio:.0%})",
+                    delta_color="inverse",
+                )
                 output_filename = uploaded_file.name.rsplit(".", 1)[0] + suffix
                 st.download_button(
                     label="Download Grayscale PDF",
