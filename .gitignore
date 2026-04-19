@@ -67,3 +67,7 @@ pylama.ini
 
 # PEP 582; https://www.python.org/dev/peps/pep-0582/
 __pypackages__/
+
+# Streamlit local runtime logs
+streamlit.out.log
+streamlit.err.log

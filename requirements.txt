@@ -3,3 +3,4 @@ Pillow
 pymupdf
 pypdf2
 ezdxf
+rhino3dm

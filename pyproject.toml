@@ -9,5 +9,6 @@ dependencies = [
     "pillow>=11.3.0",
     "pymupdf>=1.26.4",
     "pypdf2>=3.0.1",
+    "rhino3dm>=8.17.0",
     "streamlit>=1.50.0",
 ]
