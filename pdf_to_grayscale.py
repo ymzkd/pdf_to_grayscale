@@ -35,7 +35,14 @@ def convert_to_grayscale_raster(pdf_bytes: bytes, dpi: int = 300) -> bytes:
         new_page.insert_image(page.rect, stream=img_buffer.getvalue())
 
     output = io.BytesIO()
-    pdf_writer.save(output)
+    pdf_writer.save(
+        output,
+        garbage=4,
+        clean=True,
+        deflate=True,
+        deflate_images=True,
+        deflate_fonts=True,
+    )
     pdf_writer.close()
     pdf_document.close()
     return output.getvalue()
@@ -193,8 +200,13 @@ def convert_to_grayscale_objects(pdf_bytes: bytes) -> bytes:
         if annots is not None:
             for annot in annots:
                 _rewrite_annotation(annot, visited)
+    pdf.remove_unreferenced_resources()
     buf = io.BytesIO()
-    pdf.save(buf)
+    pdf.save(
+        buf,
+        object_stream_mode=pikepdf.ObjectStreamMode.generate,
+        recompress_flate=True,
+    )
     pdf.close()
     return buf.getvalue()
 
