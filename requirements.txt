@@ -5,3 +5,4 @@ pypdf2
 pikepdf
 ezdxf
 rhino3dm
+imageio-ffmpeg
