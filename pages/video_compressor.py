@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import subprocess
@@ -8,6 +9,9 @@ import imageio_ffmpeg
 import streamlit as st
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
+
+PROBE_TIMEOUT = 60
+ENCODE_TIMEOUT = 900
 
 INPUT_EXTENSIONS = ["mp4", "mov", "avi", "mkv", "webm", "m4v", "gif"]
 
@@ -50,11 +54,15 @@ def format_size(bytes_size: int) -> str:
 
 def probe(path: str) -> dict:
     # ffmpeg は -i のみだとエラー終了するが、stderr にメタ情報が出る
-    result = subprocess.run(
-        [FFMPEG, "-hide_banner", "-i", path],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [FFMPEG, "-hide_banner", "-i", path],
+            capture_output=True,
+            text=True,
+            timeout=PROBE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ファイルの解析がタイムアウトしました ({PROBE_TIMEOUT} 秒)。")
     stderr = result.stderr
     info = {"duration": 0.0, "width": 0, "height": 0, "fps": 0.0, "has_audio": False}
 
@@ -77,9 +85,10 @@ def probe(path: str) -> dict:
 
 
 @st.cache_data(show_spinner=False)
-def probe_bytes(data: bytes, suffix: str) -> dict:
+def _cached_probe(_data: bytes, digest: str, suffix: str) -> dict:
+    # digest と suffix のみがキャッシュキー。bytes はハッシュをスキップ。
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf:
-        tf.write(data)
+        tf.write(_data)
         path = tf.name
     try:
         return probe(path)
@@ -88,6 +97,11 @@ def probe_bytes(data: bytes, suffix: str) -> dict:
             os.unlink(path)
         except OSError:
             pass
+
+
+def probe_bytes(data: bytes, suffix: str) -> dict:
+    digest = hashlib.md5(data, usedforsecurity=False).hexdigest()
+    return _cached_probe(data, digest, suffix)
 
 
 def compute_target_size(src_w: int, src_h: int, max_long_edge: int | None) -> tuple[int, int]:
@@ -103,11 +117,38 @@ def compute_target_size(src_w: int, src_h: int, max_long_edge: int | None) -> tu
     return max(new_w, 2), max(new_h, 2)
 
 
-def run_ffmpeg(cmd: list[str]) -> None:
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        tail = "\n".join(result.stderr.strip().splitlines()[-15:])
-        raise RuntimeError(f"ffmpeg 実行に失敗しました:\n{tail}")
+def run_ffmpeg(cmd: list[str], timeout: int = ENCODE_TIMEOUT) -> None:
+    # 長時間のエンコードでも stderr をメモリに溜めないようファイルに流す
+    log_fd, log_path = tempfile.mkstemp(suffix=".log")
+    os.close(log_fd)
+    try:
+        with open(log_path, "wb") as stderr_f:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_f,
+                    stdin=subprocess.DEVNULL,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(
+                    f"ffmpeg がタイムアウトしました ({timeout} 秒)。"
+                    "より短い動画にするか、解像度・fps を下げて再試行してください。"
+                )
+        if result.returncode != 0:
+            with open(log_path, "r", errors="replace") as f:
+                # 末尾だけ読み込めば十分
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(size - 8192, 0))
+                tail = "\n".join(f.read().strip().splitlines()[-15:])
+            raise RuntimeError(f"ffmpeg 実行に失敗しました:\n{tail}")
+    finally:
+        try:
+            os.unlink(log_path)
+        except OSError:
+            pass
 
 
 def encode_mp4(
