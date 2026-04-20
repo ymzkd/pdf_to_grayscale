@@ -76,6 +76,20 @@ def probe(path: str) -> dict:
     return info
 
 
+@st.cache_data(show_spinner=False)
+def probe_bytes(data: bytes, suffix: str) -> dict:
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf:
+        tf.write(data)
+        path = tf.name
+    try:
+        return probe(path)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def compute_target_size(src_w: int, src_h: int, max_long_edge: int | None) -> tuple[int, int]:
     if not max_long_edge or max(src_w, src_h) <= max_long_edge:
         # 偶数化のみ
@@ -106,9 +120,13 @@ def encode_mp4(
     target_fps: float | None,
     codec: str,
     mute: bool,
+    speed: float,
     workdir: str,
 ) -> None:
-    vf_parts = [f"scale={target_w}:{target_h}:flags=lanczos"]
+    vf_parts = []
+    if speed != 1.0:
+        vf_parts.append(f"setpts=PTS/{speed}")
+    vf_parts.append(f"scale={target_w}:{target_h}:flags=lanczos")
     if target_fps:
         vf_parts.append(f"fps={target_fps}")
     vf = ",".join(vf_parts)
@@ -161,17 +179,19 @@ def encode_gif(
     target_h: int,
     fps: int,
     colors: int,
+    speed: float,
     workdir: str,
 ) -> None:
     palette = os.path.join(workdir, "palette.png")
     scale_expr = f"scale={target_w}:{target_h}:flags=lanczos"
+    speed_expr = f"setpts=PTS/{speed}," if speed != 1.0 else ""
     pal_cmd = [
         FFMPEG,
         "-y",
         "-i",
         input_path,
         "-vf",
-        f"fps={fps},{scale_expr},palettegen=max_colors={colors}",
+        f"{speed_expr}fps={fps},{scale_expr},palettegen=max_colors={colors}",
         palette,
     ]
     run_ffmpeg(pal_cmd)
@@ -184,7 +204,7 @@ def encode_gif(
         "-i",
         palette,
         "-filter_complex",
-        f"fps={fps},{scale_expr}[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3",
+        f"{speed_expr}fps={fps},{scale_expr}[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3",
         "-loop",
         "0",
         output_path,
@@ -201,10 +221,11 @@ def compress_to_mp4(
     max_fps: float | None,
     codec: str,
     mute: bool,
+    speed: float,
     workdir: str,
     status_cb,
 ) -> None:
-    duration = max(info["duration"], 0.1)
+    effective_duration = max(info["duration"] / speed, 0.1)
     has_audio = info["has_audio"] and not mute
     audio_kbps = 96 if has_audio else 0
 
@@ -213,7 +234,7 @@ def compress_to_mp4(
     target_fps = min(src_fps, max_fps) if max_fps else src_fps
 
     safety = 0.95
-    total_kbps = max(int(target_size_bytes * 8 / 1000 / duration * safety), 64)
+    total_kbps = max(int(target_size_bytes * 8 / 1000 / effective_duration * safety), 64)
     video_kbps = max(total_kbps - audio_kbps, 32)
 
     attempt = 0
@@ -238,6 +259,7 @@ def compress_to_mp4(
             target_fps,
             codec,
             mute,
+            speed,
             workdir,
         )
         size = os.path.getsize(output_path)
@@ -255,12 +277,12 @@ def compress_to_gif(
     info: dict,
     max_long_edge: int | None,
     fps: int,
+    speed: float,
     workdir: str,
     status_cb,
 ) -> None:
     long_edge = max_long_edge or max(info["width"], info["height"])
     current_fps = fps
-    colors = 256
 
     steps = [
         # (scale, fps, colors) の縮退順
@@ -272,11 +294,10 @@ def compress_to_gif(
         (min(long_edge, 320), 10, 64),
     ]
 
-    last_size = None
     for i, (edge, f, c) in enumerate(steps, 1):
         target_w, target_h = compute_target_size(info["width"], info["height"], edge)
         status_cb(f"GIF 生成中 (試行 {i}): {target_w}x{target_h}, {f}fps, {c} colors")
-        encode_gif(input_path, output_path, target_w, target_h, f, c, workdir)
+        encode_gif(input_path, output_path, target_w, target_h, f, c, speed, workdir)
         last_size = os.path.getsize(output_path)
         if last_size <= target_size_bytes:
             return
@@ -286,16 +307,60 @@ def compress_to_gif(
 st.title("動画圧縮ツール")
 st.caption(
     "mp4 / gif などを指定サイズ以下に圧縮します。2-pass エンコードでなるべく画質を保ちます。"
+    "音声は常にミュートされます（資料貼り付け用途）。"
 )
 
 uploaded = st.file_uploader("動画ファイルを選択", type=INPUT_EXTENSIONS)
 
 if uploaded is not None:
-    col_a, col_b = st.columns(2)
+    input_bytes = uploaded.getvalue()
+    input_size = len(input_bytes)
+    suffix = Path(uploaded.name).suffix or ".bin"
+
+    try:
+        src_info = probe_bytes(input_bytes, suffix)
+    except Exception as exc:
+        st.error(f"ファイルの解析に失敗しました: {exc}")
+        st.stop()
+
+    if src_info["duration"] <= 0 or src_info["width"] == 0:
+        st.error("動画の情報を取得できませんでした。別のファイルをお試しください。")
+        st.stop()
+
+    st.subheader("入力ファイル情報")
+    info_cols = st.columns(5)
+    info_cols[0].metric("サイズ", format_size(input_size))
+    info_cols[1].metric("解像度", f"{src_info['width']}×{src_info['height']}")
+    info_cols[2].metric("長さ", f"{src_info['duration']:.1f} 秒")
+    info_cols[3].metric("fps", f"{src_info['fps']:.1f}")
+    info_cols[4].metric("音声", "有" if src_info["has_audio"] else "無")
+    bitrate_kbps = int(input_size * 8 / 1000 / max(src_info["duration"], 0.1))
+    st.caption(f"推定ビットレート: 約 {bitrate_kbps} kbps")
+
+    st.divider()
+    st.subheader("変換設定")
+
+    col_a, col_b, col_c = st.columns(3)
     output_format = col_a.radio("出力形式", ("mp4", "gif"), horizontal=True)
     target_size_mb = col_b.number_input(
         "目標サイズ (MB)", min_value=0.5, max_value=100.0, value=5.0, step=0.5
     )
+    speed = col_c.number_input(
+        "再生速度倍率",
+        min_value=0.5,
+        max_value=8.0,
+        value=1.0,
+        step=0.25,
+        help="1.0 で等速。2.0 にすると 2 倍速で再生され、動画時間が半分になります。",
+    )
+    if speed != 1.0:
+        st.caption(
+            f"出力動画の長さ: 約 {src_info['duration'] / speed:.1f} 秒 "
+            f"（{speed:g}x 再生）"
+        )
+
+    # 音声は常にミュート
+    mute = True
 
     with st.expander("詳細設定", expanded=False):
         if output_format == "mp4":
@@ -306,7 +371,6 @@ if uploaded is not None:
             codec_label = st.radio(
                 "コーデック", list(CODEC_CHOICES.keys()), horizontal=True
             )
-            mute = st.checkbox("音声をミュート", value=False)
             max_long_edge = SCALE_CHOICES[scale_label]
             max_fps = FPS_CHOICES[fps_label]
             codec = CODEC_CHOICES[codec_label]
@@ -317,15 +381,11 @@ if uploaded is not None:
             fps_label = st.selectbox("fps", list(GIF_FPS_CHOICES.keys()), index=2)
             max_long_edge = SCALE_CHOICES[scale_label]
             gif_fps = GIF_FPS_CHOICES[fps_label]
-            mute = True
             codec = None
             max_fps = None
 
     if st.button("圧縮する", type="primary"):
         target_bytes = int(target_size_mb * 1024 * 1024)
-        input_bytes = uploaded.getvalue()
-        input_size = len(input_bytes)
-        suffix = Path(uploaded.name).suffix or ".bin"
 
         with tempfile.TemporaryDirectory() as workdir:
             input_path = os.path.join(workdir, f"input{suffix}")
@@ -336,19 +396,6 @@ if uploaded is not None:
                 f.write(input_bytes)
 
             try:
-                with st.status("解析中...", expanded=False) as status:
-                    info = probe(input_path)
-                    if info["duration"] <= 0 or info["width"] == 0:
-                        raise RuntimeError("動画の情報を取得できませんでした。")
-                    status.update(
-                        label=(
-                            f"解析完了: {info['width']}x{info['height']}, "
-                            f"{info['duration']:.1f}秒, {info['fps']:.1f}fps, "
-                            f"音声={'有' if info['has_audio'] else '無'}"
-                        ),
-                        state="complete",
-                    )
-
                 with st.status("エンコード中...", expanded=True) as status:
                     def status_cb(msg: str) -> None:
                         status.write(msg)
@@ -358,11 +405,12 @@ if uploaded is not None:
                             input_path,
                             output_path,
                             target_bytes,
-                            info,
+                            src_info,
                             max_long_edge,
                             max_fps,
                             codec,
                             mute,
+                            speed,
                             workdir,
                             status_cb,
                         )
@@ -371,9 +419,10 @@ if uploaded is not None:
                             input_path,
                             output_path,
                             target_bytes,
-                            info,
+                            src_info,
                             max_long_edge,
                             gif_fps,
+                            speed,
                             workdir,
                             status_cb,
                         )
