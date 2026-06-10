@@ -4,6 +4,7 @@ import io
 import os
 import re
 import tempfile
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -78,9 +79,8 @@ class DxfLoadResult:
 
 @dataclass
 class DxfConversionResult:
-    output_bytes: bytes
+    outputs: dict[str, bytes]
     source_version: str
-    target_version: str
     warnings: list[str]
     warning_count: int
     decoded_unicode_count: int
@@ -89,9 +89,8 @@ class DxfConversionResult:
 
 @dataclass
 class ThreeDmConversionResult:
-    output_bytes: bytes
+    outputs: dict[str, bytes]
     source_version: int
-    target_version: int
 
 
 def format_size(size_in_bytes: int) -> str:
@@ -191,36 +190,41 @@ def load_dxf_document(file_bytes: bytes, encoding: str | None) -> DxfLoadResult:
     )
 
 
-def convert_dxf_version(
+def convert_dxf_versions(
     file_bytes: bytes,
-    target_version: str,
+    target_versions: list[str],
     encoding: str | None,
 ) -> DxfConversionResult:
     load_result = load_dxf_document(file_bytes, encoding=encoding)
     doc = load_result.doc
     source_version = doc.dxfversion
-    doc.dxfversion = target_version
 
-    output_path = None
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp:
-            output_path = tmp.name
+    outputs: dict[str, bytes] = {}
+    for target_version in target_versions:
+        doc.dxfversion = target_version
 
-        if load_result.selected_encoding:
-            doc.saveas(output_path, encoding=load_result.selected_encoding)
-        else:
-            doc.saveas(output_path)
+        output_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp:
+                output_path = tmp.name
 
-        with open(output_path, "rb") as output_file:
-            output_bytes = output_file.read()
-    finally:
-        delete_file_if_exists(output_path)
+            if load_result.selected_encoding:
+                doc.saveas(output_path, encoding=load_result.selected_encoding)
+            else:
+                doc.saveas(output_path)
+
+            with open(output_path, "rb") as output_file:
+                output_bytes = output_file.read()
+        finally:
+            delete_file_if_exists(output_path)
+
+        label = DXF_VERSION_LABELS.get(target_version, target_version)
+        outputs[label] = output_bytes
 
     warnings = [str(error) for error in load_result.auditor.errors[:50]]
     return DxfConversionResult(
-        output_bytes=output_bytes,
+        outputs=outputs,
         source_version=source_version,
-        target_version=doc.dxfversion,
         warnings=warnings,
         warning_count=len(load_result.auditor.errors),
         decoded_unicode_count=load_result.decoded_unicode_count,
@@ -228,14 +232,13 @@ def convert_dxf_version(
     )
 
 
-def convert_3dm_version(
-    file_bytes: bytes, target_version: int
+def convert_3dm_versions(
+    file_bytes: bytes, target_versions: list[int]
 ) -> ThreeDmConversionResult:
     if rhino3dm is None:
         raise RuntimeError("rhino3dm is not installed.")
 
     input_path = write_bytes_to_tempfile(file_bytes, ".3dm")
-    output_path = None
 
     try:
         source_version = rhino3dm.File3dm.ReadArchiveVersion(input_path)
@@ -243,29 +246,43 @@ def convert_3dm_version(
         if model is None:
             raise ValueError("Failed to read the 3DM file.")
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".3dm") as tmp:
-            output_path = tmp.name
+        outputs: dict[str, bytes] = {}
+        for target_version in target_versions:
+            output_path = None
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".3dm") as tmp:
+                    output_path = tmp.name
 
-        if not model.Write(output_path, target_version):
-            raise ValueError("Failed to write the converted 3DM file.")
+                if not model.Write(output_path, target_version):
+                    raise ValueError("Failed to write the converted 3DM file.")
 
-        with open(output_path, "rb") as output_file:
-            output_bytes = output_file.read()
+                with open(output_path, "rb") as output_file:
+                    output_bytes = output_file.read()
+            finally:
+                delete_file_if_exists(output_path)
+
+            outputs[f"Rhino {target_version}"] = output_bytes
     finally:
         delete_file_if_exists(input_path)
-        delete_file_if_exists(output_path)
 
     return ThreeDmConversionResult(
-        output_bytes=output_bytes,
+        outputs=outputs,
         source_version=source_version,
-        target_version=target_version,
     )
 
 
-def build_download_name(filename: str, detected_format: str) -> str:
-    stem = Path(filename).stem
-    suffix = ".dxf" if detected_format == "DXF" else ".3dm"
-    return f"{stem}_converted{suffix}"
+def build_single_download_name(stem: str, label: str, suffix: str) -> str:
+    safe_label = label.replace(" ", "")
+    return f"{stem}_{safe_label}{suffix}"
+
+
+def build_versions_zip(stem: str, suffix: str, outputs: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for label, data in outputs.items():
+            safe_label = label.replace(" ", "")
+            archive.writestr(f"{stem}_{safe_label}{suffix}", data)
+    return buffer.getvalue()
 
 
 def get_dxf_text_encoding(
@@ -329,9 +346,9 @@ def render_dxf_encoding_ui(
 def render_dxf_result(
     result: DxfConversionResult, source_label: str, uploaded_filename: str
 ) -> None:
-    target_label = ezdxf.const.acad_release.get(result.target_version, result.target_version)
+    target_labels = list(result.outputs.keys())
     st.success("DXF 変換が完了しました。")
-    st.caption(f"{source_label} -> {target_label}")
+    st.caption(f"{source_label} -> {', '.join(target_labels)}")
 
     if result.warning_count > 0:
         st.warning(f"DXF 読み込み時に {result.warning_count} 件の警告がありました。")
@@ -347,18 +364,29 @@ def render_dxf_result(
     if result.selected_encoding:
         st.caption(f"使用した文字コード: {result.selected_encoding}")
 
-    if result.target_version != result.source_version:
-        st.info(
-            "別の DXF バージョンへ保存すると、一部の要素やメタデータが簡略化される場合があります。"
-        )
-
-    st.download_button(
-        label="変換後の DXF をダウンロード",
-        data=result.output_bytes,
-        file_name=build_download_name(uploaded_filename, "DXF"),
-        mime=DXF_MIME_TYPE,
-        type="primary",
+    st.info(
+        "別の DXF バージョンへ保存すると、一部の要素やメタデータが簡略化される場合があります。"
     )
+
+    stem = Path(uploaded_filename).stem
+    if len(result.outputs) == 1:
+        label, data = next(iter(result.outputs.items()))
+        st.download_button(
+            label="変換後の DXF をダウンロード",
+            data=data,
+            file_name=build_single_download_name(stem, label, ".dxf"),
+            mime=DXF_MIME_TYPE,
+            type="primary",
+        )
+    else:
+        zip_bytes = build_versions_zip(stem, ".dxf", result.outputs)
+        st.download_button(
+            label=f"{len(result.outputs)} バージョンをまとめて ZIP でダウンロード",
+            data=zip_bytes,
+            file_name=f"{stem}_dxf_versions.zip",
+            mime="application/zip",
+            type="primary",
+        )
 
 
 def render_dxf_converter(uploaded_file, file_bytes: bytes) -> None:
@@ -384,47 +412,69 @@ def render_dxf_converter(uploaded_file, file_bytes: bytes) -> None:
 
     dxf_labels = list(DXF_VERSION_CHOICES.keys())
     default_label = DXF_VERSION_LABELS.get(source_version, "R2010")
-    target_label = st.selectbox(
-        "出力 DXF バージョン",
+    selected_labels = st.multiselect(
+        "出力 DXF バージョン(複数選択可)",
         options=dxf_labels,
-        index=dxf_labels.index(default_label),
+        default=[default_label],
+        help="複数選択すると、すべてのバージョンをまとめて ZIP でダウンロードできます。",
     )
-    target_version = DXF_VERSION_CHOICES[target_label]
 
     encoding = render_dxf_encoding_ui(header_info, source_version)
 
     if st.button("DXF を変換", type="primary"):
-        with st.spinner("DXF を変換中..."):
-            try:
-                result = convert_dxf_version(
-                    file_bytes=file_bytes,
-                    target_version=target_version,
-                    encoding=encoding,
-                )
-            except Exception as error:
-                st.error(f"DXF 変換に失敗しました: {error}")
-            else:
-                render_dxf_result(result, source_label, uploaded_file.name)
+        if not selected_labels:
+            st.warning("出力するバージョンを 1 つ以上選択してください。")
+        else:
+            target_versions = [DXF_VERSION_CHOICES[label] for label in selected_labels]
+            with st.spinner("DXF を変換中..."):
+                try:
+                    result = convert_dxf_versions(
+                        file_bytes=file_bytes,
+                        target_versions=target_versions,
+                        encoding=encoding,
+                    )
+                except Exception as error:
+                    st.error(f"DXF 変換に失敗しました: {error}")
+                else:
+                    render_dxf_result(result, source_label, uploaded_file.name)
 
 
 def render_3dm_result(
     result: ThreeDmConversionResult, uploaded_filename: str
 ) -> None:
+    target_labels = list(result.outputs.keys())
     st.success("3DM 変換が完了しました。")
-    st.caption(f"Rhino {result.source_version} -> Rhino {result.target_version}")
+    st.caption(f"Rhino {result.source_version} -> {', '.join(target_labels)}")
 
-    if result.target_version < result.source_version:
+    has_downgrade = any(
+        version < result.source_version
+        for version in THREEDM_VERSION_CHOICES.values()
+        if f"Rhino {version}" in result.outputs
+    )
+    if has_downgrade:
         st.warning(
             "古い Rhino バージョンへ保存すると、未対応の機能やプラグインデータが失われる場合があります。"
         )
 
-    st.download_button(
-        label="変換後の 3DM をダウンロード",
-        data=result.output_bytes,
-        file_name=build_download_name(uploaded_filename, "3DM"),
-        mime=THREEDM_MIME_TYPE,
-        type="primary",
-    )
+    stem = Path(uploaded_filename).stem
+    if len(result.outputs) == 1:
+        label, data = next(iter(result.outputs.items()))
+        st.download_button(
+            label="変換後の 3DM をダウンロード",
+            data=data,
+            file_name=build_single_download_name(stem, label, ".3dm"),
+            mime=THREEDM_MIME_TYPE,
+            type="primary",
+        )
+    else:
+        zip_bytes = build_versions_zip(stem, ".3dm", result.outputs)
+        st.download_button(
+            label=f"{len(result.outputs)} バージョンをまとめて ZIP でダウンロード",
+            data=zip_bytes,
+            file_name=f"{stem}_3dm_versions.zip",
+            mime="application/zip",
+            type="primary",
+        )
 
 
 def render_3dm_converter(uploaded_file, file_bytes: bytes) -> None:
@@ -447,23 +497,30 @@ def render_3dm_converter(uploaded_file, file_bytes: bytes) -> None:
 
     version_labels = list(THREEDM_VERSION_CHOICES.keys())
     default_label = THREEDM_VERSION_LABELS.get(source_version, "Rhino 8")
-    selected_label = st.selectbox(
-        "出力 3DM バージョン",
+    selected_labels = st.multiselect(
+        "出力 3DM バージョン(複数選択可)",
         options=version_labels,
-        index=version_labels.index(default_label),
+        default=[default_label],
+        help="複数選択すると、すべてのバージョンをまとめて ZIP でダウンロードできます。",
     )
 
     if st.button("3DM を変換", type="primary"):
-        with st.spinner("3DM を変換中..."):
-            try:
-                result = convert_3dm_version(
-                    file_bytes=file_bytes,
-                    target_version=THREEDM_VERSION_CHOICES[selected_label],
-                )
-            except Exception as error:
-                st.error(f"3DM 変換に失敗しました: {error}")
-            else:
-                render_3dm_result(result, uploaded_file.name)
+        if not selected_labels:
+            st.warning("出力するバージョンを 1 つ以上選択してください。")
+        else:
+            target_versions = [
+                THREEDM_VERSION_CHOICES[label] for label in selected_labels
+            ]
+            with st.spinner("3DM を変換中..."):
+                try:
+                    result = convert_3dm_versions(
+                        file_bytes=file_bytes,
+                        target_versions=target_versions,
+                    )
+                except Exception as error:
+                    st.error(f"3DM 変換に失敗しました: {error}")
+                else:
+                    render_3dm_result(result, uploaded_file.name)
 
 
 def render_page() -> None:
