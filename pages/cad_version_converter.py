@@ -10,7 +10,7 @@ from pathlib import Path
 
 import ezdxf
 import streamlit as st
-from ezdxf import recover
+from ezdxf import path, recover
 
 try:
     import rhino3dm
@@ -62,6 +62,13 @@ DXF_CODEPAGE_TO_ENCODING_LABEL = {
 
 LEGACY_DXF_VERSIONS = {"AC1009", "AC1012", "AC1014", "AC1015", "AC1018"}
 
+DXF_EXPLODE_NONE = "そのまま(分解しない)"
+DXF_EXPLODE_EXPLODE = "ポリライン/ブロックを分解(LINE・ARC)"
+DXF_EXPLODE_FLATTEN = "すべて線分化(LINE のみ)"
+DXF_EXPLODE_CHOICES = [DXF_EXPLODE_NONE, DXF_EXPLODE_EXPLODE, DXF_EXPLODE_FLATTEN]
+
+DEFAULT_FLATTEN_DISTANCE = 0.5
+
 
 @dataclass
 class DxfHeaderInfo:
@@ -85,6 +92,8 @@ class DxfConversionResult:
     warning_count: int
     decoded_unicode_count: int
     selected_encoding: str | None
+    explode_mode: str
+    explode_count: int
 
 
 @dataclass
@@ -190,14 +199,71 @@ def load_dxf_document(file_bytes: bytes, encoding: str | None) -> DxfLoadResult:
     )
 
 
+def _explode_inserts(msp) -> None:
+    """ブロック参照(INSERT)を構成要素へ展開する。ネストにも対応。"""
+    for _ in range(10):
+        inserts = list(msp.query("INSERT"))
+        if not inserts:
+            return
+        for insert in inserts:
+            try:
+                insert.explode()
+            except Exception:
+                msp.delete_entity(insert)
+
+
+def explode_dxf_entities(
+    doc: ezdxf.document.Drawing, mode: str, flatten_distance: float
+) -> int:
+    """互換性向上のため、ポリライン等を分解または線分化する。処理件数を返す。"""
+    if mode == DXF_EXPLODE_NONE:
+        return 0
+
+    msp = doc.modelspace()
+    count = 0
+
+    if mode == DXF_EXPLODE_EXPLODE:
+        for entity in list(msp.query("LWPOLYLINE POLYLINE INSERT")):
+            try:
+                entity.explode()
+                count += 1
+            except Exception:
+                continue
+        return count
+
+    # DXF_EXPLODE_FLATTEN: すべてを LINE 線分へ近似する
+    _explode_inserts(msp)
+    targets = list(msp.query("LWPOLYLINE POLYLINE ARC CIRCLE ELLIPSE SPLINE"))
+    for entity in targets:
+        try:
+            entity_path = path.make_path(entity)
+            points = list(entity_path.flattening(flatten_distance))
+        except Exception:
+            continue
+        if len(points) < 2:
+            continue
+
+        attribs = entity.graphic_properties()
+        for start, end in zip(points, points[1:]):
+            msp.add_line(start, end, dxfattribs=dict(attribs))
+        msp.delete_entity(entity)
+        count += 1
+
+    return count
+
+
 def convert_dxf_versions(
     file_bytes: bytes,
     target_versions: list[str],
     encoding: str | None,
+    explode_mode: str = DXF_EXPLODE_NONE,
+    flatten_distance: float = DEFAULT_FLATTEN_DISTANCE,
 ) -> DxfConversionResult:
     load_result = load_dxf_document(file_bytes, encoding=encoding)
     doc = load_result.doc
     source_version = doc.dxfversion
+
+    explode_count = explode_dxf_entities(doc, explode_mode, flatten_distance)
 
     outputs: dict[str, bytes] = {}
     for target_version in target_versions:
@@ -229,6 +295,8 @@ def convert_dxf_versions(
         warning_count=len(load_result.auditor.errors),
         decoded_unicode_count=load_result.decoded_unicode_count,
         selected_encoding=load_result.selected_encoding,
+        explode_mode=explode_mode,
+        explode_count=explode_count,
     )
 
 
@@ -364,6 +432,11 @@ def render_dxf_result(
     if result.selected_encoding:
         st.caption(f"使用した文字コード: {result.selected_encoding}")
 
+    if result.explode_mode != DXF_EXPLODE_NONE:
+        st.caption(
+            f"図形分解({result.explode_mode}): {result.explode_count} 個の図形を処理しました。"
+        )
+
     st.info(
         "別の DXF バージョンへ保存すると、一部の要素やメタデータが簡略化される場合があります。"
     )
@@ -421,6 +494,26 @@ def render_dxf_converter(uploaded_file, file_bytes: bytes) -> None:
 
     encoding = render_dxf_encoding_ui(header_info, source_version)
 
+    explode_mode = st.selectbox(
+        "互換性のための図形分解",
+        options=DXF_EXPLODE_CHOICES,
+        index=0,
+        help=(
+            "受け取り側のソフトで矩形やポリライン、ブロックが正しく開けない場合に使用します。"
+            "「線分化」はすべての図形を LINE のみに変換するため互換性が最も高くなります。"
+        ),
+    )
+    flatten_distance = DEFAULT_FLATTEN_DISTANCE
+    if explode_mode == DXF_EXPLODE_FLATTEN:
+        flatten_distance = st.number_input(
+            "線分化の許容誤差(図面単位)",
+            min_value=0.001,
+            value=DEFAULT_FLATTEN_DISTANCE,
+            step=0.1,
+            format="%.3f",
+            help="小さいほど曲線を細かい線分に分割します(ファイルサイズは増加します)。",
+        )
+
     if st.button("DXF を変換", type="primary"):
         if not selected_labels:
             st.warning("出力するバージョンを 1 つ以上選択してください。")
@@ -432,6 +525,8 @@ def render_dxf_converter(uploaded_file, file_bytes: bytes) -> None:
                         file_bytes=file_bytes,
                         target_versions=target_versions,
                         encoding=encoding,
+                        explode_mode=explode_mode,
+                        flatten_distance=flatten_distance,
                     )
                 except Exception as error:
                     st.error(f"DXF 変換に失敗しました: {error}")
