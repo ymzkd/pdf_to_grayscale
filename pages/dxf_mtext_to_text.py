@@ -1,6 +1,6 @@
 import streamlit as st
 import ezdxf
-from ezdxf import recover
+from dxf_io import load_dxf_bytes
 from ezdxf.enums import TextEntityAlignment
 import io
 import math
@@ -121,7 +121,7 @@ def convert_dxf_mtext_to_text(uploaded_file, target_version=None):
     切り替えて書き出す。None の場合は入力ファイルのバージョンを維持する。
     """
     uploaded_file.seek(0)
-    doc, auditor = recover.read(uploaded_file)
+    doc, auditor = load_dxf_bytes(uploaded_file.read())
     source_version = doc.dxfversion
 
     mtext_count = 0
