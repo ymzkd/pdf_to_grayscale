@@ -1,6 +1,6 @@
 import streamlit as st
 import ezdxf
-from ezdxf import recover
+from dxf_io import load_dxf_bytes
 import os
 import re
 import tempfile
@@ -95,7 +95,7 @@ def clean_dxf_dimension_text(uploaded_file, keep_number=True, target_version=Non
     keep_number=False: "300<><>" → ""（上書きを解除し、CAD側の実測値表示に戻す）
     """
     uploaded_file.seek(0)
-    doc, auditor = recover.read(uploaded_file)
+    doc, auditor = load_dxf_bytes(uploaded_file.read())
     source_version = doc.dxfversion
 
     stats = {

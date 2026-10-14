@@ -9,7 +9,7 @@ from pathlib import Path
 
 import ezdxf
 import streamlit as st
-from ezdxf import recover
+from dxf_io import load_dxf_bytes
 
 try:
     import rhino3dm
@@ -167,7 +167,7 @@ def decode_dxf_unicode_document(doc: ezdxf.document.Drawing) -> int:
 
 def load_dxf_document(file_bytes: bytes, encoding: str | None) -> DxfLoadResult:
     if encoding is None:
-        doc, auditor = recover.read(io.BytesIO(file_bytes))
+        doc, auditor = load_dxf_bytes(file_bytes)
         return DxfLoadResult(
             doc=doc,
             auditor=auditor,
@@ -175,13 +175,8 @@ def load_dxf_document(file_bytes: bytes, encoding: str | None) -> DxfLoadResult:
             selected_encoding=None,
         )
 
-    input_path = write_bytes_to_tempfile(file_bytes, ".dxf")
-    try:
-        doc = ezdxf.readfile(input_path, encoding=encoding, errors="surrogateescape")
-        decoded_count = decode_dxf_unicode_document(doc)
-        auditor = doc.audit()
-    finally:
-        delete_file_if_exists(input_path)
+    doc, auditor = load_dxf_bytes(file_bytes, encoding=encoding)
+    decoded_count = decode_dxf_unicode_document(doc)
 
     return DxfLoadResult(
         doc=doc,
